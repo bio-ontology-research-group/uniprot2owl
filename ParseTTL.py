@@ -1,32 +1,54 @@
 from java.io import FileReader
 import os
+import time
 
 from org.apache.jena.rdf.model import ModelFactory
 from org.apache.jena.vocabulary import RDF
+from org.semanticweb.elk.owlapi import ElkReasonerFactory
 from org.semanticweb.owlapi.apibinding import OWLManager
-from org.semanticweb.owlapi.model import IRI
+from org.semanticweb.owlapi.model import IRI, AddImport, OWLClass, \
+    OWLOntologyLoaderConfiguration, OWLOntologyManager
+from org.semanticweb.owlapi.model import OWLObject
+from org.semanticweb.owlapi.reasoner import ConsoleProgressMonitor, \
+    SimpleConfiguration
 from org.semanticweb.owlapi.vocab import OWLRDFVocabulary
 
 from Queue import Queue
-from threading import Thread
 import collections
-import time
+from threading import Thread
 import traceback
+
 
 # Number of threads to use
 numthreads = 48
 
 # Choose file directories here
-input_directory = "/home/mencella/borg/swissprot_ttls2/"
-output_directory = "/home/mencella/borg/swissprot2.owl"
+input_directory = "/home/mencella/borg/swissprot_ttls/"
+output_directory = "/home/mencella/borg/swissprot.owl"
+gotaxon = "/home/mencella/borg/gotaxon.owl"
 
 up = "http://purl.uniprot.org/core/"
 
 manager = OWLManager.createOWLOntologyManager()
 factory = manager.getOWLDataFactory()
+print "Loading ontology..."
 ontology = manager.createOntology(IRI.create("http://aber-owl.net/uniprot.owl"))
+# ontology = manager.loadOntologyFromOntologyDocument(IRI.create("file:" + gotaxon))
+print "... ontology loaded."
 onturi = "http://aber-owl.net/uniprot.owl#"
 
+# Imports
+config = OWLOntologyLoaderConfiguration()
+ 
+importDeclaraton = factory.getOWLImportsDeclaration(IRI.create("http://purl.obolibrary.org/obo/go.owl"));
+manager.applyChange(AddImport(ontology, importDeclaraton))
+manager.makeLoadImportRequest(importDeclaraton, config)
+ 
+importDeclaraton = factory.getOWLImportsDeclaration(IRI.create("http://purl.obolibrary.org/obo/ncbitaxon.owl"));
+manager.applyChange(AddImport(ontology, importDeclaraton))
+manager.makeLoadImportRequest(importDeclaraton, config)
+ 
+# manager.saveOntology(ontology, IRI.create("file:" + "/home/mencella/borg/gotaxon.owl"))
 
 def create_relation(s):
     if s == "part-of":
@@ -41,10 +63,17 @@ def create_class(s):
     return factory.getOWLClass(IRI.create(s))
     
 def add_anno(resource, prop, cont):
-    anno = factory.getOWLAnnotation(factory.getOWLAnnotationProperty(prop.getIRI()),
-                                    factory.getOWLLiteral(cont))
+    anno = factory.getOWLAnnotation(factory.getOWLAnnotationProperty(prop.getIRI()), factory.getOWLLiteral(cont))
     axiom = factory.getOWLAnnotationAssertionAxiom(resource.getIRI(), anno)
     manager.addAxiom(ontology, axiom)
+    
+# Subclasses of 'cellular location'
+progressMonitor = ConsoleProgressMonitor();
+config = SimpleConfiguration(progressMonitor);
+reasoner = ElkReasonerFactory().createReasoner(ontology, config);
+loc_cls = create_class("http://purl.obolibrary.org/obo/GO_0005575")
+loc_nodeset = reasoner.getSubClasses(loc_cls, False).getFlattened()
+print loc_nodeset
     
 genericProteinNames = dict()
 proteinCounter = 0
@@ -55,7 +84,7 @@ for tfile in os.listdir(input_directory):
     queue.put(tfile)
 print "Queue built. There are %d files to be read from %s." % (queue._qsize(), input_directory)
 
-def readFiles(q):
+def readFiles(i, q):
     while True:
         tfile = q.get()
         
@@ -68,6 +97,7 @@ def readFiles(q):
             rdfModel.read(FileReader(input_directory + tfile), "http://foobar#", "TURTLE")
         except:
             print "Error with file: ", tfile
+            q.task_done()
             #traceback.print_exc()
             continue
         
@@ -76,7 +106,6 @@ def readFiles(q):
         while iri_iter.hasNext(): # iterate over all Protein iri's in file
             iris = iri_iter.nextStatement().getSubject()
             iri = iris.toString()
-            #print iri
             label = rdfModel.listStatements(iris, rdfModel.createProperty(up + "mnemonic"), None).nextStatement().getObject().toString()
             
             # subclass
@@ -130,11 +159,19 @@ def readFiles(q):
             for stmt in rdfModel.listStatements(rdfModel.createResource(iri), rdfModel.createProperty(up+"classifiedWith"), None):
                 if(stmt.getObject().toString().startswith("http://purl.obolibrary.org/obo/")):
                     gofunctions[stmt.getObject().toString()] = 1
-            for fun in gofunctions.keys():      
+            for fun in gofunctions.keys():
+                # Decide whether this is a function/process or location
+                if create_class(fun) in loc_nodeset: # location
+                    relation = "located-in"
+                else: # function/process
+                    relation = "participates-in"
                 manager.addAxiom(ontology, factory.getOWLSubClassOfAxiom(cls, factory.getOWLObjectSomeValuesFrom(create_relation("has-member"), 
-                                                                        factory.getOWLObjectSomeValuesFrom(create_relation("has-function"), create_class(fun)))))
+                                                                        factory.getOWLObjectSomeValuesFrom(create_relation(relation), create_class(fun)))))
                 
             organism = rdfModel.listStatements(rdfModel.createResource(iri), rdfModel.createProperty(up+"organism"), None).nextStatement().getObject().toString()
+            prefix = "http://purl.obolibrary.org/obo/NCBITaxon_"
+            slash = organism.rfind('/')
+            organism = prefix + organism[slash+1:]
             manager.addAxiom(ontology, factory.getOWLSubClassOfAxiom(cl, factory.getOWLObjectSomeValuesFrom(create_relation("created-in-organism"), create_class(organism))))
 
         #signals to queue job is done
@@ -143,7 +180,7 @@ def readFiles(q):
 
 for i in range(numthreads):
     print "Thread %d initiated" % (i+1)
-    t = Thread(target=readFiles, args=(queue,))
+    t = Thread(target=readFiles, args=(i, queue))
     t.setDaemon(True)
     t.start()
 
