@@ -6,11 +6,10 @@ from org.apache.jena.rdf.model import ModelFactory
 from org.apache.jena.vocabulary import RDF
 from org.semanticweb.elk.owlapi import ElkReasonerFactory
 from org.semanticweb.owlapi.apibinding import OWLManager
-from org.semanticweb.owlapi.model import IRI, AddImport, OWLClass, \
-    OWLOntologyLoaderConfiguration, OWLOntologyManager
-from org.semanticweb.owlapi.model import OWLObject
+from org.semanticweb.owlapi.model import IRI
 from org.semanticweb.owlapi.reasoner import ConsoleProgressMonitor, \
     SimpleConfiguration
+from org.semanticweb.owlapi.util import OWLOntologyMerger
 from org.semanticweb.owlapi.vocab import OWLRDFVocabulary
 
 from Queue import Queue
@@ -25,28 +24,38 @@ numthreads = 48
 # Choose file directories here
 input_directory = "/home/mencella/borg/swissprot_ttls/"
 output_directory = "/home/mencella/borg/swissprot.owl"
-gotaxon = "/home/mencella/borg/gotaxon.owl"
+go = "/home/mencella/borg/owl_files/go.owl"
+ncbi = "/home/mencella/borg/owl_files/ncbitaxon.owl"
+
+onturi = "http://aber-owl.net/uniprot.owl#"
 
 up = "http://purl.uniprot.org/core/"
 
 manager = OWLManager.createOWLOntologyManager()
 factory = manager.getOWLDataFactory()
-print "Loading ontology..."
-ontology = manager.createOntology(IRI.create("http://aber-owl.net/uniprot.owl"))
-# ontology = manager.loadOntologyFromOntologyDocument(IRI.create("file:" + gotaxon))
-print "... ontology loaded."
-onturi = "http://aber-owl.net/uniprot.owl#"
+
+# Load GO and NCBI
+print "Loading ontologies..."
+manager.loadOntologyFromOntologyDocument(IRI.create("file:" + go))
+manager.loadOntologyFromOntologyDocument(IRI.create("file:" + ncbi))
+print "... ontologies loaded. Merging..."
+merger = OWLOntologyMerger(manager)
+ontology = merger.createMergedOntology(manager, IRI.create("http://aber-owl.net/uniprot.owl"))
+print "... merged."
+
+# This line for without GO or NCBITaxon
+# ontology = manager.createOntology(IRI.create("http://aber-owl.net/uniprot.owl"))
 
 # Imports
-config = OWLOntologyLoaderConfiguration()
- 
-importDeclaraton = factory.getOWLImportsDeclaration(IRI.create("http://purl.obolibrary.org/obo/go.owl"));
-manager.applyChange(AddImport(ontology, importDeclaraton))
-manager.makeLoadImportRequest(importDeclaraton, config)
- 
-importDeclaraton = factory.getOWLImportsDeclaration(IRI.create("http://purl.obolibrary.org/obo/ncbitaxon.owl"));
-manager.applyChange(AddImport(ontology, importDeclaraton))
-manager.makeLoadImportRequest(importDeclaraton, config)
+# config = OWLOntologyLoaderConfiguration()
+#  
+# importDeclaraton = factory.getOWLImportsDeclaration(IRI.create("http://purl.obolibrary.org/obo/go.owl"));
+# manager.applyChange(AddImport(ontology, importDeclaraton))
+# manager.makeLoadImportRequest(importDeclaraton, config)
+#  
+# importDeclaraton = factory.getOWLImportsDeclaration(IRI.create("http://purl.obolibrary.org/obo/ncbitaxon.owl"));
+# manager.applyChange(AddImport(ontology, importDeclaraton))
+# manager.makeLoadImportRequest(importDeclaraton, config)
  
 # manager.saveOntology(ontology, IRI.create("file:" + "/home/mencella/borg/gotaxon.owl"))
 
@@ -68,12 +77,14 @@ def add_anno(resource, prop, cont):
     manager.addAxiom(ontology, axiom)
     
 # Subclasses of 'cellular location'
+print "Finding subclasses of cellular location..."
 progressMonitor = ConsoleProgressMonitor();
 config = SimpleConfiguration(progressMonitor);
 reasoner = ElkReasonerFactory().createReasoner(ontology, config);
 loc_cls = create_class("http://purl.obolibrary.org/obo/GO_0005575")
 loc_nodeset = reasoner.getSubClasses(loc_cls, False).getFlattened()
 print loc_nodeset
+print "... done."
     
 genericProteinNames = dict()
 proteinCounter = 0
@@ -193,5 +204,6 @@ end = time.clock()
 print "Conversion completed after %d seconds." % (end - start)
 print "Number of axioms: ", ontology.getLogicalAxiomCount()
 
+print "Saving ontology to disk..."
 manager.saveOntology(ontology, IRI.create("file:" + output_directory))
 print "Ontology saved as %s" % output_directory
